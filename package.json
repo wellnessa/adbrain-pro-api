@@ -1,0 +1,17 @@
+{
+  "name": "adbrain-pro-api",
+  "version": "2.0.0",
+  "description": "AdBrain Pro - Gestor Sênior de Anúncios IA",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
