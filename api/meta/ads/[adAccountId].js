@@ -19,7 +19,11 @@ export default async function handler(req, res) {
   try {
     const data = await metaApi.getAds(accessToken, cleanId, date_preset);
     
+    // Log para debug
+    console.log('[ADS API] Raw response:', JSON.stringify(data).slice(0, 500));
+    
     if (data.error) {
+      console.error('[ADS API] Error:', data.error);
       return res.status(400).json({ success: false, error: data.error.message });
     }
 
@@ -28,9 +32,12 @@ export default async function handler(req, res) {
     }
 
     // Processar anúncios
-    const ads = data.data.map(ad => {
+    const ads = await Promise.all(data.data.map(async (ad) => {
       const insightsData = ad.insights?.data?.[0] || {};
       const creative = ad.creative || {};
+      
+      // Log para debug do criativo
+      console.log(`[ADS API] Ad ${ad.id} creative:`, JSON.stringify(creative).slice(0, 300));
       
       // Extrair métricas
       const metrics = {
@@ -49,7 +56,7 @@ export default async function handler(req, res) {
       
       // Extrair conversões
       if (insightsData.actions) {
-        const conversionTypes = ['purchase', 'omni_purchase', 'lead', 'onsite_conversion.lead_grouped'];
+        const conversionTypes = ['purchase', 'omni_purchase', 'lead', 'onsite_conversion.lead_grouped', 'complete_registration', 'contact', 'submit_application'];
         for (const type of conversionTypes) {
           const action = insightsData.actions.find(a => a.action_type === type);
           if (action) {
@@ -61,7 +68,7 @@ export default async function handler(req, res) {
       
       // Extrair CPA
       if (insightsData.cost_per_action_type) {
-        const cpaTypes = ['purchase', 'omni_purchase', 'lead'];
+        const cpaTypes = ['purchase', 'omni_purchase', 'lead', 'complete_registration', 'contact'];
         for (const type of cpaTypes) {
           const costAction = insightsData.cost_per_action_type.find(a => a.action_type === type);
           if (costAction) {
@@ -88,35 +95,95 @@ export default async function handler(req, res) {
       
       // Calcular receita estimada se não tiver
       if (metrics.revenue === 0 && metrics.conversions > 0) {
-        metrics.revenue = metrics.conversions * aiEngine.DEFAULT_CONFIG.ticketMedio;
+        metrics.revenue = metrics.conversions * (aiEngine.DEFAULT_CONFIG?.ticketMedio || 500);
       }
       
       // Calcular ROAS
-      if (metrics.spend > 0) {
+      if (metrics.spend > 0 && metrics.revenue > 0) {
         metrics.roas = metrics.revenue / metrics.spend;
       }
       
-      // Extrair dados do criativo
-      let imageUrl = creative.thumbnail_url || creative.image_url || null;
+      // ====== EXTRAÇÃO DE IMAGEM MELHORADA ======
+      let imageUrl = null;
       let body = creative.body || '';
       let title = creative.title || '';
       let ctaType = creative.call_to_action_type || '';
       
-      // Tentar extrair do object_story_spec
-      if (creative.object_story_spec) {
+      // 1. Tentar thumbnail_url ou image_url direto
+      imageUrl = creative.thumbnail_url || creative.image_url || null;
+      
+      // 2. Tentar do object_story_spec (posts de Facebook/Instagram)
+      if (!imageUrl && creative.object_story_spec) {
         const spec = creative.object_story_spec;
+        
+        // Link data (posts com link)
         if (spec.link_data) {
           body = spec.link_data.message || body;
           title = spec.link_data.name || title;
           imageUrl = spec.link_data.image_url || spec.link_data.picture || imageUrl;
           ctaType = spec.link_data.call_to_action?.type || ctaType;
         }
+        
+        // Video data (posts de vídeo)
         if (spec.video_data) {
           body = spec.video_data.message || body;
           title = spec.video_data.title || title;
-          imageUrl = spec.video_data.image_url || imageUrl;
+          imageUrl = spec.video_data.image_url || spec.video_data.video_id || imageUrl;
+        }
+        
+        // Photo data (posts de foto)
+        if (spec.photo_data) {
+          body = spec.photo_data.caption || body;
+          imageUrl = spec.photo_data.image_url || spec.photo_data.url || imageUrl;
+        }
+        
+        // Instagram media (posts do Instagram promovidos)
+        if (spec.instagram_actor_id) {
+          // Posts do Instagram usam o effective_object_story_id
+          console.log(`[ADS API] Instagram post detected, actor: ${spec.instagram_actor_id}`);
         }
       }
+      
+      // 3. Tentar do asset_feed_spec (anúncios dinâmicos/carrossel)
+      if (!imageUrl && creative.asset_feed_spec) {
+        const feed = creative.asset_feed_spec;
+        if (feed.images && feed.images.length > 0) {
+          imageUrl = feed.images[0].url || feed.images[0].hash;
+        }
+        if (feed.videos && feed.videos.length > 0) {
+          imageUrl = feed.videos[0].thumbnail_url || feed.videos[0].video_id;
+        }
+      }
+      
+      // 4. Se ainda não tem imagem e tem effective_object_story_id, tentar buscar
+      if (!imageUrl && creative.effective_object_story_id) {
+        try {
+          const storyId = creative.effective_object_story_id;
+          console.log(`[ADS API] Fetching story ${storyId}`);
+          
+          // Tentar buscar a imagem do post
+          const storyUrl = `https://graph.facebook.com/v18.0/${storyId}?fields=full_picture,picture,source,attachments{media}&access_token=${accessToken}`;
+          const storyRes = await fetch(storyUrl);
+          const storyData = await storyRes.json();
+          
+          if (storyData && !storyData.error) {
+            imageUrl = storyData.full_picture || storyData.picture || null;
+            
+            // Tentar attachments
+            if (!imageUrl && storyData.attachments?.data?.[0]?.media) {
+              imageUrl = storyData.attachments.data[0].media.image?.src;
+            }
+          }
+        } catch (e) {
+          console.error('[ADS API] Error fetching story:', e.message);
+        }
+      }
+      
+      // 5. Usar instagram_permalink_url como fallback para mostrar algo
+      const instagramUrl = creative.instagram_permalink_url || null;
+      
+      // Log final
+      console.log(`[ADS API] Ad ${ad.id} final imageUrl:`, imageUrl);
       
       // Calcular score do anúncio
       let score = 50;
@@ -126,7 +193,7 @@ export default async function handler(req, res) {
       else if (metrics.ctr > 2) score += 20;
       else if (metrics.ctr > 1.5) score += 15;
       else if (metrics.ctr > 1) score += 10;
-      else if (metrics.ctr < 0.5) score -= 15;
+      else if (metrics.ctr < 0.5 && metrics.impressions > 100) score -= 15;
       
       // CPA
       if (metrics.cpa > 0 && metrics.cpa < 200) score += 30;
@@ -158,14 +225,17 @@ export default async function handler(req, res) {
         campaignId: ad.campaign_id,
         adsetId: ad.adset_id,
         score,
-        scoreClassification: aiEngine.getStatusClassification(score),
+        scoreClassification: aiEngine.getStatusClassification?.(score) || (score >= 70 ? 'good' : score >= 40 ? 'average' : 'poor'),
+        previewUrl: ad.preview_shareable_link || null,
+        instagramUrl,
         creative: {
           id: creative.id,
           name: creative.name,
           imageUrl,
           body,
           title,
-          ctaType
+          ctaType,
+          objectType: creative.object_type || null
         },
         metrics: {
           impressions: metrics.impressions,
@@ -179,9 +249,15 @@ export default async function handler(req, res) {
           cpa: parseFloat(metrics.cpa.toFixed(2)),
           revenue: parseFloat(metrics.revenue.toFixed(2)),
           roas: parseFloat(metrics.roas.toFixed(2))
+        },
+        // Debug info (remover em produção)
+        _debug: {
+          hasInsights: !!ad.insights?.data?.[0],
+          hasCreative: !!ad.creative,
+          creativeFields: Object.keys(creative)
         }
       };
-    });
+    }));
 
     // Ordenar por score (melhores primeiro)
     ads.sort((a, b) => b.score - a.score);
@@ -193,7 +269,7 @@ export default async function handler(req, res) {
       datePreset: date_preset
     });
   } catch (error) {
-    console.error('Erro ao buscar anúncios:', error);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor' });
+    console.error('[ADS API] Error:', error);
+    return res.status(500).json({ success: false, error: 'Erro interno do servidor', details: error.message });
   }
 }
