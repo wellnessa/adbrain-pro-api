@@ -1,4 +1,5 @@
-import { cors, handleOptions } from '../_lib/middleware.js';
+import { cors, handleOptions, getAuthHeader } from '../_lib/middleware.js';
+import { verifyToken, saveMetaToken } from '../_lib/db.js';
 import metaApi from '../_lib/meta-api.js';
 
 export default async function handler(req, res) {
@@ -26,13 +27,30 @@ export default async function handler(req, res) {
       });
     }
 
+    // Verificar se tem JWT do usuário logado para salvar o token
+    let tokenSaved = false;
+    const jwtToken = getAuthHeader(req);
+    
+    if (jwtToken) {
+      // Verificar se o JWT é válido (não é um token Meta)
+      if (jwtToken.split('.').length === 3 && jwtToken.length < 200) {
+        const verification = await verifyToken(jwtToken);
+        if (verification.valid) {
+          // Salvar o token Meta no banco de dados
+          const saveResult = await saveMetaToken(verification.userId, accessToken);
+          tokenSaved = saveResult.success;
+        }
+      }
+    }
+
     return res.status(200).json({
       success: true,
       user: {
         id: userData.id,
         name: userData.name
       },
-      message: 'Conectado com sucesso!'
+      tokenSaved,
+      message: tokenSaved ? 'Conectado e salvo com sucesso!' : 'Conectado com sucesso!'
     });
   } catch (error) {
     console.error('Erro ao conectar Meta:', error);
