@@ -57,7 +57,7 @@ export const metaApi = {
     return response.json();
   },
 
-  // Buscar anúncios
+  // Buscar anúncios - MELHORADO para pegar imagens de posts Instagram
   async getAds(accessToken, adAccountId, datePreset = 'last_30d') {
     const fields = [
       'id',
@@ -66,13 +66,37 @@ export const metaApi = {
       'effective_status',
       'campaign_id',
       'adset_id',
-      'creative{id,name,thumbnail_url,image_url,body,title,call_to_action_type,object_story_spec,asset_feed_spec}',
+      'preview_shareable_link',
+      // Creative com mais campos para pegar imagens
+      'creative{id,name,thumbnail_url,image_url,body,title,call_to_action_type,object_story_spec,asset_feed_spec,effective_object_story_id,object_type,instagram_permalink_url}',
       `insights.date_preset(${datePreset}){impressions,clicks,spend,ctr,cpm,frequency,reach,actions,cost_per_action_type,action_values}`
     ].join(',');
     
     const url = `${META_API_BASE}/act_${adAccountId}/ads?fields=${fields}&limit=100&access_token=${accessToken}`;
     const response = await fetch(url);
     return response.json();
+  },
+
+  // Buscar detalhes do post do Instagram/Facebook
+  async getMediaDetails(accessToken, mediaId) {
+    try {
+      // Tentar buscar como post do Instagram
+      const igUrl = `${META_API_BASE}/${mediaId}?fields=id,media_type,media_url,thumbnail_url,permalink&access_token=${accessToken}`;
+      const igResponse = await fetch(igUrl);
+      const igData = await igResponse.json();
+      
+      if (!igData.error && (igData.media_url || igData.thumbnail_url)) {
+        return igData;
+      }
+      
+      // Tentar buscar como post do Facebook
+      const fbUrl = `${META_API_BASE}/${mediaId}?fields=id,full_picture,picture,source,permalink_url&access_token=${accessToken}`;
+      const fbResponse = await fetch(fbUrl);
+      return fbResponse.json();
+    } catch (e) {
+      console.error('Erro ao buscar mídia:', e);
+      return null;
+    }
   },
 
   // Buscar breakdown por idade e gênero
