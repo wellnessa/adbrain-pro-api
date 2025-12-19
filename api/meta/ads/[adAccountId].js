@@ -19,9 +19,6 @@ export default async function handler(req, res) {
   try {
     const data = await metaApi.getAds(accessToken, cleanId, date_preset);
     
-    // Log para debug
-    console.log('[ADS API] Raw response:', JSON.stringify(data).slice(0, 500));
-    
     if (data.error) {
       console.error('[ADS API] Error:', data.error);
       return res.status(400).json({ success: false, error: data.error.message });
@@ -35,9 +32,6 @@ export default async function handler(req, res) {
     const ads = await Promise.all(data.data.map(async (ad) => {
       const insightsData = ad.insights?.data?.[0] || {};
       const creative = ad.creative || {};
-      
-      // Log para debug do criativo
-      console.log(`[ADS API] Ad ${ad.id} creative:`, JSON.stringify(creative).slice(0, 300));
       
       // Extrair métricas
       const metrics = {
@@ -103,13 +97,13 @@ export default async function handler(req, res) {
         metrics.roas = metrics.revenue / metrics.spend;
       }
       
-      // ====== EXTRAÇÃO DE IMAGEM MELHORADA ======
+      // ====== EXTRAÇÃO DE IMAGEM - MÉTODO AGRESSIVO ======
       let imageUrl = null;
       let body = creative.body || '';
       let title = creative.title || '';
       let ctaType = creative.call_to_action_type || '';
       
-      // 1. Tentar thumbnail_url ou image_url direto
+      // 1. Tentar thumbnail_url ou image_url direto do creative
       imageUrl = creative.thumbnail_url || creative.image_url || null;
       
       // 2. Tentar do object_story_spec (posts de Facebook/Instagram)
@@ -125,22 +119,16 @@ export default async function handler(req, res) {
         }
         
         // Video data (posts de vídeo)
-        if (spec.video_data) {
+        if (!imageUrl && spec.video_data) {
           body = spec.video_data.message || body;
           title = spec.video_data.title || title;
-          imageUrl = spec.video_data.image_url || spec.video_data.video_id || imageUrl;
+          imageUrl = spec.video_data.image_url || imageUrl;
         }
         
         // Photo data (posts de foto)
-        if (spec.photo_data) {
+        if (!imageUrl && spec.photo_data) {
           body = spec.photo_data.caption || body;
           imageUrl = spec.photo_data.image_url || spec.photo_data.url || imageUrl;
-        }
-        
-        // Instagram media (posts do Instagram promovidos)
-        if (spec.instagram_actor_id) {
-          // Posts do Instagram usam o effective_object_story_id
-          console.log(`[ADS API] Instagram post detected, actor: ${spec.instagram_actor_id}`);
         }
       }
       
@@ -150,40 +138,49 @@ export default async function handler(req, res) {
         if (feed.images && feed.images.length > 0) {
           imageUrl = feed.images[0].url || feed.images[0].hash;
         }
-        if (feed.videos && feed.videos.length > 0) {
-          imageUrl = feed.videos[0].thumbnail_url || feed.videos[0].video_id;
+        if (!imageUrl && feed.videos && feed.videos.length > 0) {
+          imageUrl = feed.videos[0].thumbnail_url;
         }
       }
       
-      // 4. Se ainda não tem imagem e tem effective_object_story_id, tentar buscar
-      if (!imageUrl && creative.effective_object_story_id) {
+      // 4. Se tem creative.id mas não tem imagem, buscar thumbnail diretamente
+      if (!imageUrl && creative.id) {
         try {
-          const storyId = creative.effective_object_story_id;
-          console.log(`[ADS API] Fetching story ${storyId}`);
-          
-          // Tentar buscar a imagem do post
-          const storyUrl = `https://graph.facebook.com/v18.0/${storyId}?fields=full_picture,picture,source,attachments{media}&access_token=${accessToken}`;
-          const storyRes = await fetch(storyUrl);
-          const storyData = await storyRes.json();
-          
-          if (storyData && !storyData.error) {
-            imageUrl = storyData.full_picture || storyData.picture || null;
-            
-            // Tentar attachments
-            if (!imageUrl && storyData.attachments?.data?.[0]?.media) {
-              imageUrl = storyData.attachments.data[0].media.image?.src;
-            }
+          const thumbnail = await metaApi.getCreativeThumbnail(accessToken, creative.id);
+          if (thumbnail) {
+            imageUrl = thumbnail;
           }
         } catch (e) {
-          console.error('[ADS API] Error fetching story:', e.message);
+          console.error('[ADS API] Error fetching creative thumbnail:', e.message);
         }
       }
       
-      // 5. Usar instagram_permalink_url como fallback para mostrar algo
-      const instagramUrl = creative.instagram_permalink_url || null;
+      // 5. Se tem effective_object_story_id, buscar imagem do post
+      if (!imageUrl && creative.effective_object_story_id) {
+        try {
+          const storyImage = await metaApi.getStoryImage(accessToken, creative.effective_object_story_id);
+          if (storyImage) {
+            imageUrl = storyImage;
+          }
+        } catch (e) {
+          console.error('[ADS API] Error fetching story image:', e.message);
+        }
+      }
       
-      // Log final
-      console.log(`[ADS API] Ad ${ad.id} final imageUrl:`, imageUrl);
+      // 6. Se tem object_story_id, tentar também
+      if (!imageUrl && creative.object_story_id) {
+        try {
+          const storyImage = await metaApi.getStoryImage(accessToken, creative.object_story_id);
+          if (storyImage) {
+            imageUrl = storyImage;
+          }
+        } catch (e) {
+          console.error('[ADS API] Error fetching object story image:', e.message);
+        }
+      }
+      
+      // URL do Instagram como fallback informativo
+      const instagramUrl = creative.instagram_permalink_url || null;
       
       // Calcular score do anúncio
       let score = 50;
@@ -249,12 +246,6 @@ export default async function handler(req, res) {
           cpa: parseFloat(metrics.cpa.toFixed(2)),
           revenue: parseFloat(metrics.revenue.toFixed(2)),
           roas: parseFloat(metrics.roas.toFixed(2))
-        },
-        // Debug info (remover em produção)
-        _debug: {
-          hasInsights: !!ad.insights?.data?.[0],
-          hasCreative: !!ad.creative,
-          creativeFields: Object.keys(creative)
         }
       };
     }));
